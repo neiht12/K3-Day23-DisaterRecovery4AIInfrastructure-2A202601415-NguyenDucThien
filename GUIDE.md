@@ -47,6 +47,17 @@ bash scripts/up_bare.sh
 curl localhost:8080/v1/infer
 ```
 
+Windows PowerShell equivalent (run from the repository root):
+
+```powershell
+python -m pip install -r requirements.txt
+python state/seed_vectors.py --region a --docs 200
+python state/seed_vectors.py --region b --docs 0 --weights-mb 0
+Set-Content -NoNewline edge/active_region a
+.\scripts\up_bare.ps1
+Invoke-RestMethod http://localhost:8080/v1/infer
+```
+
 `make seed` creates Region A with 200 documents and model weights on disk; Region B starts **empty** — that gap is intentional and is what you'll fix in Step 3.
 
 **Checkpoint** — all three services must respond:

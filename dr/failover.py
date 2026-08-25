@@ -36,12 +36,65 @@ LOG = pathlib.Path("reports/failover-events.jsonl")
 
 def emit(**kw):
     """TODO: append 1 dòng JSONL có ts + iso vào LOG, và print ra stdout."""
-    raise NotImplementedError
+    now = time.time()
+    event = {"ts": now, "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), **kw}
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    print(json.dumps(event, ensure_ascii=False), flush=True)
+    return event
+
+
+def state_of(region: str) -> dict:
+    response = httpx.get(f"{URL[region]}/v1/state", timeout=2.0)
+    response.raise_for_status()
+    return response.json()
 
 
 def failover(target: str, backend: str, wait: float) -> dict:
     """TODO: 5 bước ở trên, đúng thứ tự."""
-    raise NotImplementedError
+    if target not in URL or wait <= 0:
+        raise ValueError("invalid target or wait")
+    try:
+        target_state = state_of(target)
+        emit(step="1_verify_target", target=target, target_state=target_state)
+    except Exception as exc:
+        emit(step="1_verify_target", target=target, ok=False, error=type(exc).__name__)
+        return {"ok": False, "target": target, "reason": "target_state_unavailable"}
+    primary = "b" if target == "a" else "a"
+    try:
+        restored = snapshot.get(target, backend)
+        rpo = snapshot.rpo(pathlib.Path(f"state/region-{primary}/vectors.sqlite"),
+                           pathlib.Path(f"state/region-{target}/vectors.sqlite"))
+        emit(step="2_restore_snapshot", target=target, **restored, **rpo)
+    # snapshot.get() intentionally raises SystemExit when no snapshot has ever
+    # been taken.  Record that operational failure, but never swallow Ctrl-C.
+    except (Exception, SystemExit) as exc:
+        emit(step="2_restore_snapshot", target=target, ok=False, error=str(exc))
+        return {"ok": False, "target": target, "reason": "snapshot_restore_failed"}
+    pool_file = pathlib.Path(f"state/region-{target}/pool_state")
+    pool_file.parent.mkdir(parents=True, exist_ok=True)
+    pool_file.write_text("full\n", encoding="utf-8")
+    emit(step="3_scale_pool", target=target, pool_state="full")
+    started, last_reason = time.time(), "not_checked"
+    while time.time() - started < wait:
+        try:
+            response = httpx.get(f"{URL[target]}/readyz", timeout=min(2.0, wait))
+            body = response.json()
+            if response.status_code == 200 and body.get("ready") is True:
+                emit(step="4_wait_ready", target=target, ok=True, waited_s=round(time.time() - started, 2))
+                break
+            last_reason = f"http_{response.status_code}"
+        except Exception as exc:
+            last_reason = type(exc).__name__
+        time.sleep(0.25)
+    else:
+        emit(step="4_wait_ready", target=target, ok=False, waited_s=round(time.time() - started, 2), reason=last_reason)
+        return {"ok": False, "target": target, "reason": "target_not_ready"}
+    pathlib.Path("edge/active_region").write_text(target + "\n", encoding="utf-8")
+    emit(step="5_dns_cutover", target=target, active_region=target)
+    return {"ok": True, "target": target, "restored": restored, "rpo": rpo,
+            "target_state": state_of(target), "cutover": True}
 
 
 if __name__ == "__main__":

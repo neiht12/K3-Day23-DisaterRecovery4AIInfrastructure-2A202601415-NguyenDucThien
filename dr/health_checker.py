@@ -30,12 +30,47 @@ URL = {"a": "http://127.0.0.1:8001", "b": "http://127.0.0.1:8002"}
 
 def probe(region: str, timeout: float) -> tuple[bool, str]:
     """TODO: trả về (ready, reason). Timeout PHẢI có — netblock làm request treo mãi."""
-    raise NotImplementedError
+    try:
+        response = httpx.get(f"{URL[region]}/readyz", timeout=timeout)
+        body = response.json()
+        if response.status_code == 200 and body.get("ready") is True:
+            return True, "ready"
+        reasons = body.get("reasons", []) if isinstance(body, dict) else []
+        return False, ";".join(reasons) or f"http_{response.status_code}"
+    except Exception as exc:
+        return False, type(exc).__name__
 
 
 def run(interval: float, timeout: float, threshold: int, duration: float, out: pathlib.Path):
     """TODO: vòng lặp poll + phát hiện transition + ghi JSONL."""
-    raise NotImplementedError
+    if interval <= 0 or timeout <= 0 or threshold < 1 or duration < 0:
+        raise ValueError("invalid health-check settings")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    state = {region: "HEALTHY" for region in URL}
+    failures = {region: 0 for region in URL}
+    end = time.time() + duration
+    with out.open("a", encoding="utf-8") as handle:
+        while time.time() < end:
+            for region in URL:
+                ready, reason = probe(region, timeout)
+                if ready:
+                    failures[region] = 0
+                    desired = "HEALTHY"
+                else:
+                    failures[region] += 1
+                    desired = "UNHEALTHY" if failures[region] >= threshold else state[region]
+                if desired != state[region]:
+                    now = time.time()
+                    event = {"ts": now, "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                             "event": "state_change", "region": region, "to": desired,
+                             "reason": reason, "consecutive_fails": failures[region],
+                             "interval_s": interval, "threshold": threshold}
+                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    handle.flush()
+                    state[region] = desired
+            remaining = end - time.time()
+            if remaining > 0:
+                time.sleep(min(interval, remaining))
 
 
 if __name__ == "__main__":

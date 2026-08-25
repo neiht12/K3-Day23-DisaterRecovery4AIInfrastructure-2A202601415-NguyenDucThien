@@ -26,6 +26,7 @@ PHẢI truyền `--backend bare` tường minh, nếu không nó mặc định `
 trên máy không có Docker daemon (`docker compose ... start` thất bại).
 """
 import argparse
+import ctypes
 import json
 import os
 import pathlib
@@ -69,10 +70,54 @@ def pid_of(region: str) -> int | None:
         return None
     pid = int(f.read_text().strip())
     try:
+        if os.name == "nt":
+            # `os.kill(pid, 0)` is not a portable existence check on Windows.
+            # Keep the freshly written PID: a suspended process can reject a
+            # query even though it is precisely the process that must resume.
+            return pid
         os.kill(pid, 0)
         return pid
     except OSError:
         return None
+
+
+def pause_process(pid: int):
+    """Pause a bare uvicorn process on the current platform."""
+    if os.name == "nt":
+        _windows_suspend(pid, resume=False)
+    else:
+        os.kill(pid, signal.SIGSTOP)
+
+
+def resume_process(pid: int):
+    """Resume a process paused by :func:`pause_process`."""
+    if os.name == "nt":
+        _windows_suspend(pid, resume=True)
+    else:
+        os.kill(pid, signal.SIGCONT)
+
+
+def terminate_process(pid: int):
+    """Force-stop a bare uvicorn process on the current platform."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=True)
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
+def _windows_suspend(pid: int, resume: bool):
+    """Suspend/resume a process without requiring PowerShell modules or tools."""
+    access = 0x1F0FFF  # PROCESS_ALL_ACCESS; required by NtSuspendProcess on Windows
+    handle = ctypes.windll.kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        raise OSError(f"cannot open process {pid}")
+    try:
+        operation = ctypes.windll.ntdll.NtResumeProcess if resume else ctypes.windll.ntdll.NtSuspendProcess
+        status = operation(handle)
+        if status != 0:
+            raise OSError(f"Nt{'Resume' if resume else 'Suspend'}Process failed: 0x{status:08x}")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
 
 
 def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
@@ -96,7 +141,10 @@ def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
         # netblock: SIGSTOP -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
         #           (đúng hành vi của iptables DROP ở tầng app)
         # stop    : SIGKILL -> cổng đóng => ConnectError ngay
-        os.kill(pid, signal.SIGSTOP if mode == "netblock" else signal.SIGKILL)
+        if mode == "netblock":
+            pause_process(pid)
+        else:
+            terminate_process(pid)
     else:
         svc = f"serving-{region}"
         if mode == "stop":
@@ -111,8 +159,9 @@ def restore(region: str, backend: str):
     if backend == "bare":
         pid = pid_of(region)
         if pid:
-            os.kill(pid, signal.SIGCONT)
-            return event(action="restore", region=region, method="SIGCONT", pid=pid)
+            resume_process(pid)
+            return event(action="restore", region=region,
+                         method="NtResumeProcess" if os.name == "nt" else "SIGCONT", pid=pid)
         return event(action="restore", region=region, method="need_manual_start",
                      note="process da bi SIGKILL, chay `make up-bare` lai")
     subprocess.run(["docker", "compose", "start", f"serving-{region}"], check=False)

@@ -1,39 +1,42 @@
-# Postmortem — DR Drill Lab 23 (TEMPLATE)
+# Postmortem — DR Drill Lab 23
 
-Theo đúng template §4 "Sau Failover: Blameless Postmortem". Blameless: câu hỏi là
-"hệ thống/process nào cho phép chuyện này", không phải "ai làm sai".
+## Timeline
 
-## 1. Timeline (mọi dòng phải có evidence path:line)
-
-| ISO time | Sự kiện | Evidence |
+| Time | Event | Evidence |
 |---|---|---|
-| | outage bắt đầu | |
-| | user đầu tiên bị ảnh hưởng | |
-| | health check alert | |
-| | operator confirm cutover | |
-| | resolved (request đầu tiên OK từ region phụ) | |
+| 05:45:09 | Region A was stopped; RTO clock started. | `chaos/chaos-events.jsonl:3` |
+| 05:45:09 | First edge request failed. | `reports/drill-2-withdr.jsonl:25` |
+| 05:45:31 | Health checker declared Region A UNHEALTHY after three consecutive failures. | `reports/health-events.jsonl:2` |
+| 05:45:31 | Operator incident notification and automated runbook confirmation occurred. | `reports/runbook-run.jsonl:2` |
+| 05:45:38 | Region B became ready and DNS cutover completed. | `reports/failover-events.jsonl:4` and `reports/failover-events.jsonl:5` |
+| 05:45:41 | Runbook recorded a successful post-incident verification. | `reports/runbook-run.jsonl:7` |
 
-## 2. RTO/RPO đo được vs mục tiêu — gap ở bước nào?
+## RTO/RPO and gap analysis
 
-- RTO mục tiêu: 300s · đo được: `__s` · gap: `__s`
-- RPO mục tiêu: 300s · đo được: `__s` (`__` doc bị mất) · gap: `__s`
-- **Bước tốn nhiều giây nhất:** `____` — vì sao?
+- RTO target: 300s; measured: 32.1s; gap: 267.9s under target.
+- RPO target: 300s; measured: 12.02s and 6 documents lost; gap: 287.98s under target.
+- Longest component: health-check detection (22.0s observed). The 5s interval and threshold of 3 impose a 15s detection floor; client timeout and polling alignment account for the additional observed delay.
 
-## 3. Root cause (5 whys)
+## Root cause (5 whys)
 
-Không phải "vì tôi chạy chaos script". Câu hỏi: *nếu đây là outage thật, bước nào
-trong runbook của tôi sẽ thất bại?*
+1. Users received errors because Region A was intentionally stopped.
+2. The edge still routed traffic to A until failover completed.
+3. Region B began empty and warm, so it could not serve immediately.
+4. The runbook restored the most recent filesystem snapshot, scaled the pool, waited for readiness, then cut over.
+5. The remaining loss was bounded by the 30-second replication cadence, rather than being an unbounded state loss.
 
-## 4. Action items (có owner + deadline)
+This is blameless: the drill exposed the expected recovery path and its time costs, not an operator error.
 
-| # | Action | Owner | Deadline | Giảm RTO/RPO bao nhiêu giây |
+## Action items
+
+| # | Action item | Owner | Deadline | Expected effect |
 |---|---|---|---|---|
-| 1 | | | | |
-| 2 | | | | |
+| 1 | Evaluate a 2s health-check interval with the same anti-flap threshold. | On-call / platform | Next drill | Reduce detection floor from 15s to 6s. |
+| 2 | Test a continuously warm Region B pool. | Serving platform | Next sprint | Remove most of the 6.39s warm-up. |
+| 3 | Reduce replication cadence after storage-cost review. | Data platform | Next sprint | Reduce RPO and documents lost. |
 
-## 5. Ba câu hỏi bắt buộc trả lời
+## Required reflection
 
-1. `interval × threshold` của bạn là bao nhiêu giây? Nó chiếm bao nhiêu % RTO?
-2. Nếu hạ interval xuống 1s, RTO giảm mấy giây — và bạn trả giá gì (§4 flapping)?
-3. Nếu outage kéo dài 6 giờ và region chính mất dữ liệu vĩnh viễn, `docs_lost` của
-   bạn có nghĩa gì với khách hàng?
+1. `interval × threshold = 5 × 3 = 15s`; it is 46.7% of the 32.1s measured RTO.
+2. At 1s with threshold 3, the floor becomes 3s: roughly 12s less. The cost is more probes and a higher flapping/false-positive risk, so the threshold and timeout need revalidation.
+3. For a six-hour permanent primary loss, the 6 lost documents represent writes accepted after the last replicated snapshot. Their business impact depends on the customer workflow, so those writes must be reconciled or replayed from an upstream source.

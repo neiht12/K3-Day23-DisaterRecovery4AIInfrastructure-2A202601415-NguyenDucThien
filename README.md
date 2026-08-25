@@ -31,12 +31,29 @@ bash scripts/up_bare.sh
 curl localhost:8080/v1/infer
 ```
 
+On Windows PowerShell, use the equivalent commands instead:
+
+```powershell
+python -m pip install -r requirements.txt
+python state/seed_vectors.py --region a --docs 200
+python state/seed_vectors.py --region b --docs 0 --weights-mb 0
+Set-Content -NoNewline edge/active_region a
+.\scripts\up_bare.ps1
+Invoke-RestMethod http://localhost:8080/v1/infer
+```
+
 Expected response: `"edge_region":"a"` and an answer starting with `"[a] ..."`.
 
 Stop everything:
 
 ```bash
 bash scripts/down_bare.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\scripts\down_bare.ps1
 ```
 
 > **Docker mode** (optional, `docker compose up -d`) works for local exploration, but is **not** used for the graded drill — timing is not reproducible across machines. Every drill in [GUIDE.md](GUIDE.md) runs in bare mode with `--mock`.
@@ -60,7 +77,7 @@ tools/      measure_rto.py — computes RTO/RPO from logs and validates the dril
 tests/      Unit tests for your dr/ code, plus the evidence-gate tests used
             for grading.
 reports/    Templates you fill in: runbook.md, rto-evidence.md, postmortem.md.
-scripts/    up_bare.sh / down_bare.sh — start/stop the stack without Docker.
+scripts/    up_bare.sh / down_bare.sh and up_bare.ps1 / down_bare.ps1 — start/stop the stack without Docker.
 ```
 
 ## Where to Go Next
